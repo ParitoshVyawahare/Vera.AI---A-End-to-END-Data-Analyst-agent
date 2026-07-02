@@ -6,6 +6,7 @@ import pandas as pd
 from utils.data_loader import load_file
 from agents.analyzer import analyze
 from agents.report_agent import stream_report
+from agents.chart_agent import generate_charts
 
 st.set_page_config(page_title="AI Data Analyst", layout="wide", page_icon="📊")
 st.title("📊 AI Data Analyst")
@@ -18,6 +19,8 @@ if "analysis" not in st.session_state:
     st.session_state.analysis = None
 if "report_md" not in st.session_state:
     st.session_state.report_md = None
+if "charts" not in st.session_state:
+    st.session_state.charts = None
 
 # ─── Upload ───────────────────────────────────────────────────────
 uploaded = st.file_uploader(
@@ -32,7 +35,10 @@ if uploaded is not None and (
     with st.spinner("Reading and profiling your data..."):
         st.session_state.dataset = load_file(uploaded)
         st.session_state.analysis = analyze(st.session_state.dataset)
-        st.session_state.report_md = None   # reset report for new file
+        st.session_state.report_md = None
+        st.session_state.charts = generate_charts(
+            st.session_state.dataset, st.session_state.analysis
+        )
 
 # ─── Render ───────────────────────────────────────────────────────
 ds = st.session_state.dataset
@@ -42,6 +48,10 @@ if ds is None:
     st.info("👆 Upload a file to begin.")
     st.stop()
 
+# Data quality heads-up
+if ds.renamed_columns:
+    renames = ", ".join(f"`{orig}` → `{new}`" for new, orig in ds.renamed_columns.items())
+    st.warning(f"⚠️ Duplicate column names detected and renamed: {renames}")
 # Overview strip
 q = res.quality
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -51,8 +61,8 @@ c3.metric("Missing cells", f"{q['total_missing']:,}")
 c4.metric("Duplicate rows", q["duplicate_rows"])
 c5.metric("Memory (MB)", q["memory_mb"])
 
-tab_report, tab_preview, tab_schema, tab_stats, tab_corr, tab_outliers = st.tabs(
-    ["🤖 AI Report", "Preview", "Schema", "Summary stats", "Correlations", "Outliers"]
+tab_report, tab_charts, tab_preview, tab_schema, tab_stats, tab_corr, tab_outliers = st.tabs(
+    ["🤖 AI Report", "📈 Charts", "Preview", "Schema", "Summary stats", "Correlations", "Outliers"]
 )
 
 with tab_report:
@@ -78,6 +88,21 @@ with tab_report:
         st.markdown(st.session_state.report_md)
     else:
         st.info("Click **Generate report** to have the AI analyze this dataset.")
+
+with tab_charts:
+    st.subheader("Auto-generated visualizations")
+    if not st.session_state.charts:
+        st.info("No charts to display for this dataset.")
+    else:
+        for i in range(0, len(st.session_state.charts), 2):
+            cols = st.columns(2)
+            for j, col in enumerate(cols):
+                if i + j < len(st.session_state.charts):
+                    chart = st.session_state.charts[i + j]
+                    with col:
+                        st.plotly_chart(chart.figure, use_container_width=True)
+                        if chart.caption:
+                            st.caption(chart.caption)
 
 with tab_preview:
     st.dataframe(ds.df.head(50), use_container_width=True)
@@ -123,4 +148,4 @@ with tab_outliers:
         st.json(res.outliers_multivariate.__dict__)
 
 st.divider()
-st.caption("Next: auto-generated charts, then a Q&A chat.")
+st.caption("Next up: Q&A chat with sandboxed code execution.")
