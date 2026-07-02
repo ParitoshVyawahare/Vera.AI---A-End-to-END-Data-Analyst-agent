@@ -1,0 +1,12 @@
+streamlit>=1.39
+pandas>=2.2
+numpy<2
+matplotlib>=3.9
+plotly>=5.24
+scikit-learn>=1.5
+scipy>=1.14
+langchain>=0.3.7
+langchain-groq>=0.2
+python-dotenv>=1.0
+openpyxl>=3.1
+pyarrow>=17.0
