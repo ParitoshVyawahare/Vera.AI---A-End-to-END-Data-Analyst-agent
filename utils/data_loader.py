@@ -163,3 +163,25 @@ def _json_safe(v):
     if isinstance(v, (pd.Timestamp, np.datetime64)):
         return str(v)
     return v
+
+def sanitize_name(filename: str) -> str:
+    """Turn a filename into a valid Python identifier prefixed with 'df_'.
+    Used for multi-file uploads so each dataframe gets a stable, readable
+    variable name the LLM can reference in generated code.
+
+    Examples:
+      'sales.csv'                 -> 'df_sales'
+      'Q4 Products (2024).csv'    -> 'df_q4_products_2024'
+      '123-users.parquet'         -> 'df_users'
+    """
+    import re
+    stem = Path(filename).stem.lower()
+    # Replace any non-alphanumeric run with a single underscore
+    cleaned = re.sub(r"[^a-z0-9]+", "_", stem)
+    # Strip leading digits and underscores (Python identifiers can't start with a digit)
+    cleaned = re.sub(r"^[_0-9]+", "", cleaned)
+    # Collapse consecutive underscores
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned:
+        cleaned = "data"
+    return f"df_{cleaned}"

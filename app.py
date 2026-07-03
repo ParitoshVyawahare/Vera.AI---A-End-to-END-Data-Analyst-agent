@@ -2,12 +2,14 @@
 
 import streamlit as st
 import pandas as pd
+from pathlib import Path
 
-from utils.data_loader import load_file
+from utils.data_loader import load_file, sanitize_name
 from agents.analyzer import analyze
 from agents.report_agent import stream_report
 from agents.chart_agent import generate_charts
 from agents.qa_agent import ask, QATurn
+from utils.exporters import build_markdown, build_pdf, build_bundle_zip, timestamp
 
 st.set_page_config(
     page_title="Vera.AI — analysis you can cite",
@@ -148,6 +150,17 @@ st.markdown("""
     border-color: #0A4A3B;
     color: white;
   }
+  [data-testid="stDownloadButton"] > button {
+    background: #FFFFFF;
+    color: #0E5C4A;
+    border: 1px solid #0E5C4A;
+    text-align: center;
+    justify-content: center;
+  }
+  [data-testid="stDownloadButton"] > button:hover {
+    background: #0E5C4A;
+    color: white;
+  }
   [data-testid="stChatMessage"] {
     background: #FFFFFF;
     border: 1px solid #E8E4D9;
@@ -209,8 +222,10 @@ st.markdown("""
 
 
 # ─── Session state ────────────────────────────────────────────────
-if "dataset" not in st.session_state:
-    st.session_state.dataset = None
+if "datasets" not in st.session_state:
+    st.session_state.datasets = {}          # dict[var_name -> Dataset]
+if "primary_name" not in st.session_state:
+    st.session_state.primary_name = None    # which df is primary
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
 if "report_md" not in st.session_state:
@@ -222,31 +237,43 @@ if "qa_history" not in st.session_state:
 
 
 # ─── Upload ───────────────────────────────────────────────────────
-st.markdown('<div class="vera-label">Upload your dataset</div>', unsafe_allow_html=True)
+st.markdown('<div class="vera-label">Upload your dataset(s)</div>', unsafe_allow_html=True)
 
-uploaded = st.file_uploader(
+uploaded_files = st.file_uploader(
     label="Upload your dataset",
     type=["csv", "tsv", "xlsx", "xls", "parquet", "json"],
     label_visibility="collapsed",
+    accept_multiple_files=True,
+    help="Upload one file, or multiple to enable cross-file Q&A (merge/join).",
 )
 
-if uploaded is not None and (
-    st.session_state.dataset is None
-    or st.session_state.dataset.source_name != uploaded.name
-):
-    with st.spinner("Reading and profiling your data..."):
-        st.session_state.dataset = load_file(uploaded)
-        st.session_state.analysis = analyze(st.session_state.dataset)
+# Detect if the set of uploaded files has changed
+new_names = tuple(sorted(f.name for f in uploaded_files)) if uploaded_files else ()
+existing_names = tuple(sorted(ds.source_name for ds in st.session_state.datasets.values()))
+
+if uploaded_files and new_names != existing_names:
+    with st.spinner(f"Reading and profiling {len(uploaded_files)} file(s)..."):
+        new_datasets = {}
+        for f in uploaded_files:
+            var_name = sanitize_name(f.name)
+            # Handle collisions (two files sanitize to the same key)
+            suffix = 2
+            base = var_name
+            while var_name in new_datasets:
+                var_name = f"{base}_{suffix}"
+                suffix += 1
+            new_datasets[var_name] = load_file(f)
+
+        st.session_state.datasets = new_datasets
+        st.session_state.primary_name = next(iter(new_datasets))
+        primary_ds = new_datasets[st.session_state.primary_name]
+        st.session_state.analysis = analyze(primary_ds)
         st.session_state.report_md = None
-        st.session_state.charts = generate_charts(
-            st.session_state.dataset, st.session_state.analysis
-        )
+        st.session_state.charts = generate_charts(primary_ds, st.session_state.analysis)
         st.session_state.qa_history = []
 
-ds = st.session_state.dataset
-res = st.session_state.analysis
-
-if ds is None:
+# Nothing uploaded — show prompt and stop
+if not st.session_state.datasets:
     st.markdown("""
     <div style="text-align:center; color:#6B6B6B; font-family:'Instrument Serif', Georgia, serif;
                 font-style:italic; font-size:1.05rem; margin-top:2rem;">
@@ -256,10 +283,44 @@ if ds is None:
     st.stop()
 
 
-# ─── Quality warning ─────────────────────────────────────────────
-if ds.renamed_columns:
-    renames = ", ".join(f"`{orig}` → `{new}`" for new, orig in ds.renamed_columns.items())
-    st.warning(f"⚠️ Duplicate column names detected and renamed: {renames}")
+# ─── Primary-file picker (multi-file mode only) ──────────────────
+if len(st.session_state.datasets) > 1:
+    st.markdown('<div class="vera-label">Primary dataset</div>', unsafe_allow_html=True)
+    col_pick, col_info = st.columns([2, 3])
+    with col_pick:
+        keys = list(st.session_state.datasets.keys())
+        selected = st.selectbox(
+            "Primary dataset",
+            options=keys,
+            index=keys.index(st.session_state.primary_name),
+            format_func=lambda k: f"{k}  ({st.session_state.datasets[k].source_name})",
+            label_visibility="collapsed",
+        )
+    with col_info:
+        st.caption(
+            f"💬 Ask Vera can query all {len(st.session_state.datasets)} files. "
+            f"Reports, charts, and overview use the primary."
+        )
+
+    if selected != st.session_state.primary_name:
+        with st.spinner("Re-analyzing with new primary dataset..."):
+            st.session_state.primary_name = selected
+            primary_ds = st.session_state.datasets[selected]
+            st.session_state.analysis = analyze(primary_ds)
+            st.session_state.report_md = None
+            st.session_state.charts = generate_charts(primary_ds, st.session_state.analysis)
+        st.rerun()
+
+# Primary dataset for report/charts/overview
+ds = st.session_state.datasets[st.session_state.primary_name]
+res = st.session_state.analysis
+
+
+# ─── Quality warnings (across all uploaded files) ────────────────
+for var_name, dataset in st.session_state.datasets.items():
+    if dataset.renamed_columns:
+        renames = ", ".join(f"`{orig}` → `{new}`" for new, orig in dataset.renamed_columns.items())
+        st.warning(f"⚠️ `{dataset.source_name}`: duplicate column names renamed — {renames}")
 
 
 # ─── Overview metrics ────────────────────────────────────────────
@@ -275,16 +336,13 @@ c5.metric("Memory (MB)", q["memory_mb"])
 
 # ─── Answer rendering helper ─────────────────────────────────────
 def _render_answer(turn: QATurn):
-    """Render a QATurn's answer inline. Leads with a plain-English
-    explanation, then shows the raw result. Falls back to stdout when
-    the LLM used print() instead of returning a value."""
+    """Render a QATurn's answer inline."""
     if not turn.success:
         st.error(f"⚠️ {turn.error}")
         with st.expander("View generated code"):
             st.code(turn.code, language="python")
         return
 
-    # Lead with the plain-English explanation
     if turn.explanation:
         st.markdown(
             f"<div style='font-size:1.02rem; color:#1A1A1A; margin-bottom:0.9rem; "
@@ -292,13 +350,11 @@ def _render_answer(turn: QATurn):
             unsafe_allow_html=True,
         )
 
-    # Then the raw result
     if turn.figure is not None:
         st.pyplot(turn.figure)
     elif isinstance(turn.value, (pd.DataFrame, pd.Series)):
         st.dataframe(turn.value, use_container_width=True)
     elif turn.value is not None:
-        # Only show if no explanation already covered it
         if not turn.explanation:
             st.write(turn.value)
     elif turn.stdout:
@@ -311,6 +367,57 @@ def _render_answer(turn: QATurn):
         st.code(turn.code, language="python")
 
 
+# ─── Report download buttons helper ──────────────────────────────
+def _render_download_buttons():
+    """Show three download buttons: Markdown, PDF, Bundle."""
+    st.markdown('<div class="vera-label" style="margin-top:2rem;">Export</div>', unsafe_allow_html=True)
+    base_name = Path(ds.source_name).stem
+    ts = timestamp()
+
+    dl1, dl2, dl3 = st.columns(3)
+
+    with dl1:
+        st.download_button(
+            label="📥 Download Markdown",
+            data=build_markdown(st.session_state.report_md, ds.source_name),
+            file_name=f"vera_report_{base_name}_{ts}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+
+    with dl2:
+        try:
+            pdf_bytes = build_pdf(st.session_state.report_md, ds.source_name)
+            st.download_button(
+                label="📄 Download PDF",
+                data=pdf_bytes,
+                file_name=f"vera_report_{base_name}_{ts}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        except Exception:
+            st.button("📄 PDF (unavailable)", disabled=True, use_container_width=True)
+
+    with dl3:
+        try:
+            bundle_bytes = build_bundle_zip(
+                st.session_state.report_md,
+                ds.source_name,
+                res.to_context_dict(),
+                st.session_state.charts,
+            )
+            st.download_button(
+                label="📦 Download Bundle (.zip)",
+                data=bundle_bytes,
+                file_name=f"vera_bundle_{base_name}_{ts}.zip",
+                mime="application/zip",
+                use_container_width=True,
+                help="Report (MD + PDF) + all charts as PNG + raw analysis as JSON",
+            )
+        except Exception:
+            st.button("📦 Bundle (unavailable)", disabled=True, use_container_width=True)
+
+
 # ─── Tabs ────────────────────────────────────────────────────────
 st.markdown('<div class="vera-label" style="margin-top:2.5rem;">Analysis</div>', unsafe_allow_html=True)
 
@@ -319,32 +426,45 @@ tab_qa, tab_report, tab_charts, tab_preview, tab_schema, tab_stats, tab_corr, ta
 )
 
 with tab_qa:
-    st.markdown("""
+    n_files = len(st.session_state.datasets)
+    st.markdown(f"""
     <div style="margin-bottom:1.5rem;">
       <div style="font-family:'Instrument Serif',Georgia,serif; font-size:1.6rem; margin-bottom:0.4rem;">
         Ask Vera about your data
       </div>
       <div style="color:#6B6B6B; font-size:0.95rem;">
         Vera writes pandas code to answer your questions, runs it safely, and returns the result.
+        {"She can query across all " + str(n_files) + " uploaded files." if n_files > 1 else ""}
       </div>
     </div>
     """, unsafe_allow_html=True)
 
     if not st.session_state.qa_history:
         st.markdown('<div class="vera-label">Try one of these</div>', unsafe_allow_html=True)
-        suggestions = [
-            "How many rows and columns are there?",
-            "What are the column names and their types?",
-            "Show the top 5 rows sorted by the first numeric column",
-            "What are the summary statistics of the numeric columns?",
-        ]
+
+        # Suggestions adapt to single vs multi-file mode
+        if n_files > 1:
+            df_names = list(st.session_state.datasets.keys())
+            suggestions = [
+                f"How many rows are in each dataframe?",
+                f"What columns do {df_names[0]} and {df_names[1]} have in common?",
+                f"What are the column types across all dataframes?",
+                f"Show the summary statistics for {df_names[0]}",
+            ]
+        else:
+            suggestions = [
+                "How many rows and columns are there?",
+                "What are the column names and their types?",
+                "Show the top 5 rows sorted by the first numeric column",
+                "What are the summary statistics of the numeric columns?",
+            ]
+
         cols = st.columns(2)
         for i, s in enumerate(suggestions):
             if cols[i % 2].button(s, key=f"suggest_{i}", use_container_width=True):
                 st.session_state._pending_question = s
                 st.rerun()
 
-    # Render existing conversation
     for turn in st.session_state.qa_history:
         with st.chat_message("user"):
             st.write(turn.question)
@@ -361,7 +481,12 @@ with tab_qa:
         with st.chat_message("assistant", avatar="📊"):
             with st.spinner("Vera is thinking..."):
                 try:
-                    turn = ask(question, ds, history=st.session_state.qa_history)
+                    turn = ask(
+                        question,
+                        st.session_state.datasets,
+                        history=st.session_state.qa_history,
+                        primary_name=st.session_state.primary_name,
+                    )
                 except Exception as e:
                     st.error(f"Something went wrong: {e}")
                     turn = None
@@ -397,10 +522,12 @@ with tab_report:
                 stream_report(res, ds.source_name)
             )
             st.session_state.report_md = streamed
+            _render_download_buttons()
         except Exception as e:
             st.error(f"Report generation failed: {e}")
     elif st.session_state.report_md:
         st.markdown(st.session_state.report_md)
+        _render_download_buttons()
     else:
         st.info("Click **Generate report** to have Vera analyze this dataset.")
 

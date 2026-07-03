@@ -2,7 +2,8 @@
 
 The sandbox does three things:
 1. Parses the code with `ast` to reject dangerous constructs before running.
-2. Runs the code in a restricted namespace (only pd, np, plt, and df exposed).
+2. Runs the code in a restricted namespace (only pd, np, plt, and the
+   provided dataframe(s) are exposed).
 3. Captures the final expression's value as the "result" to return.
 
 This is intentionally conservative — many things are blocked that could
@@ -112,14 +113,30 @@ def _split_last_expr(code: str) -> tuple[str, str | None]:
     return code, None
 
 
-def safe_execute(code: str, df: pd.DataFrame) -> ExecutionResult:
-    """Run LLM-generated code against the user's dataframe."""
+def safe_execute(
+    code: str,
+    df: pd.DataFrame | None = None,
+    dataframes: dict[str, pd.DataFrame] | None = None,
+) -> ExecutionResult:
+    """Run LLM-generated code against one or more dataframes.
+
+    Two modes:
+    - Single-file (backward-compat): pass `df=some_df`. It's exposed
+      in the sandbox as the variable `df`.
+    - Multi-file: pass `dataframes={"df_sales": s, "df_products": p}`.
+      Each entry is exposed under its dict key, so the LLM can reference
+      them by name (e.g. `df_sales.merge(df_products, on='id')`).
+
+    You can also pass both — `df` becomes the variable `df`, and each
+    entry in `dataframes` is exposed under its own name. All dataframes
+    are copied to prevent the sandbox from mutating the caller's data.
+    """
     # Static safety check
     reason = _check_ast_safety(code)
     if reason is not None:
         return ExecutionResult(success=False, error=reason, code=code)
 
-    # Build the restricted namespace
+    # Build the restricted builtins
     safe_builtins = {name: __builtins__[name] if isinstance(__builtins__, dict)
                      else getattr(__builtins__, name)
                      for name in ALLOWED_BUILTINS
@@ -128,11 +145,17 @@ def safe_execute(code: str, df: pd.DataFrame) -> ExecutionResult:
 
     ns: dict[str, Any] = {
         "__builtins__": safe_builtins,
-        "df": df.copy(),          # copy so LLM can't mutate the user's data
         "pd": pd,
         "np": np,
         "plt": plt,
     }
+
+    # Expose dataframes — single `df`, a dict of named ones, or both
+    if df is not None:
+        ns["df"] = df.copy()
+    if dataframes:
+        for name, frame in dataframes.items():
+            ns[name] = frame.copy()
 
     # Capture stdout
     import io, contextlib

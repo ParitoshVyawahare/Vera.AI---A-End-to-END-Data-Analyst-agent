@@ -49,15 +49,26 @@ def _get_llm() -> ChatGroq:
     )
 
 
-def _format_schema(dataset: Dataset) -> str:
-    """Compact schema string for the LLM. Includes sample values because
-    they're often what determines whether a filter should be `== 'US'` or
-    `== 'United States'`."""
+def _format_schema(datasets: dict[str, Dataset]) -> str:
+    """Compact schema string for one or more datasets. Each dataset is
+    presented with its variable name (e.g. `df_sales`), source file,
+    shape, and per-column type + samples. Sample values are critical:
+    they're often what determines whether a filter should be `== 'US'`
+    or `== 'United States'`."""
     lines = []
-    for p in dataset.profiles:
-        samples = ", ".join(str(v) for v in p.sample_values[:3])
-        lines.append(f"  - `{p.name}` ({p.kind}, dtype={p.dtype}) — samples: {samples}")
-    return "\n".join(lines)
+    for var_name, dataset in datasets.items():
+        n_rows = len(dataset.df)
+        n_cols = dataset.df.shape[1]
+        lines.append(
+            f"\n▸ `{var_name}` ({n_rows:,} rows × {n_cols} cols, "
+            f"source: {dataset.source_name})"
+        )
+        for p in dataset.profiles:
+            samples = ", ".join(str(v) for v in p.sample_values[:3])
+            lines.append(
+                f"    - `{p.name}` ({p.kind}, dtype={p.dtype}) — samples: {samples}"
+            )
+    return "\n".join(lines).strip()
 
 
 def _format_history(history: list[QATurn], max_turns: int = MAX_HISTORY_TURNS) -> str:
@@ -128,23 +139,46 @@ def _generate_explanation(question: str, code: str, value: Any, stdout: str) -> 
 
 def ask(
     question: str,
-    dataset: Dataset,
+    datasets: dict[str, Dataset] | Dataset,
     history: list[QATurn] | None = None,
+    primary_name: str | None = None,
 ) -> QATurn:
-    """Ask Vera a question. Returns the QATurn (with code + result + errors)."""
-    history = history or []
-    df = dataset.df
+    """Ask Vera a question.
 
-    schema = _format_schema(dataset)
-    head = df.head(3).to_string(max_cols=10, max_colwidth=30)
+    Accepts either a single Dataset (backward-compat) OR a dict of
+    {variable_name: Dataset} for multi-file Q&A. In multi-file mode,
+    every dataframe is exposed in the sandbox by its variable name,
+    so the LLM can `.merge()` across them.
+
+    Args:
+        question: user's natural-language question
+        datasets: one Dataset, or {var_name: Dataset} mapping
+        history: prior QATurns for context
+        primary_name: which df's head to show in the prompt (defaults
+                      to the first key in `datasets`)
+    """
+    history = history or []
+
+    # Backward-compat: single Dataset becomes a one-entry dict
+    if isinstance(datasets, Dataset):
+        datasets = {"df": datasets}
+
+    if primary_name is None or primary_name not in datasets:
+        primary_name = next(iter(datasets))
+
+    primary_ds = datasets[primary_name]
+    dataframes = {name: ds.df for name, ds in datasets.items()}
+
+    schema = _format_schema(datasets)
+    head = primary_ds.df.head(3).to_string(max_cols=10, max_colwidth=30)
     history_str = _format_history(history)
 
     messages = build_qa_messages(
         question=question,
         schema=schema,
         head=head,
-        n_rows=len(df),
-        n_cols=df.shape[1],
+        n_dataframes=len(datasets),
+        primary_name=primary_name,
         history=history_str,
     )
 
@@ -167,7 +201,8 @@ def ask(
             error="Vera couldn't answer this from the available data.",
         )
 
-    result = safe_execute(code, df)
+    # Execute with all dataframes in scope
+    result = safe_execute(code, dataframes=dataframes)
 
     explanation = ""
     if result.success:
