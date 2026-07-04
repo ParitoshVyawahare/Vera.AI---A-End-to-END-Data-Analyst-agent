@@ -1,14 +1,3 @@
----
-title: Vera.AI
-emoji: 📊
-colorFrom: green
-colorTo: yellow
-sdk: docker
-app_port: 7860
-pinned: false
-license: mit
-short_description: AI data analyst that only speaks in numbers.
----
 
 # Vera.AI
 
