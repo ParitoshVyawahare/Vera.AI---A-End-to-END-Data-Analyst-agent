@@ -57,7 +57,8 @@ No `exec(llm_output)` here. Every piece of generated code is parsed with Python'
 
 ## 🏗️ Architecture
 
-![Vera.AI Architecture](docs/architecture.png)
+<img width="852" height="593" alt="image" src="https://github.com/user-attachments/assets/debe0634-81ac-408c-9e3d-a1825075a811" />
+
 
 Vera is composed of **four specialized AI agents** coordinated by a Streamlit orchestrator:
 
