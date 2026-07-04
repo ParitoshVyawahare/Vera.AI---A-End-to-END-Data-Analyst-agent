@@ -57,6 +57,9 @@ No `exec(llm_output)` here. Every piece of generated code is parsed with Python'
 
 ## 🏗️ Architecture
 
+
+DEMO link :- https://www.loom.com/share/fb0d1a7aba6e49f898388043edd04cd5
+
 <img width="852" height="593" alt="image" src="https://github.com/user-attachments/assets/debe0634-81ac-408c-9e3d-a1825075a811" />
 
 
